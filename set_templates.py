@@ -123,18 +123,17 @@ if __name__ == "__main__":
     for ssp in np.array(np.meshgrid(ages, metals, alphas)).T.reshape(-1,3):
         filenames.append(filenames_miles10(*ssp))
     wave, stars = load_stars(filenames)
-    stars = broad2resolution(wave, stars.T, 2.51, res).T
     ##########################################################################
     # Load spectral lines
     em_hbeta = make_emission_template(4861.333, res, wave)
     em_OIII_2 = make_emission_template(4958.91, res, wave)
     em_OIII_1 = make_emission_template(5006.84, res, wave)
     em_NI = make_emission_template(5200.257, res, wave)
-    em_halpha = make_emission_template(6564.61, res, wave)
-    em_NII_1 = make_emission_template(6585.27, res, wave)
-    em_NII_2 = make_emission_template(6549.86, res, wave)
-    em_SII_1 = make_emission_template(6718.29, res, wave)
-    em_SII_2 = make_emission_template(6732.67, res, wave)
+    # em_halpha = make_emission_template(6564.61, res, wave)
+    # em_NII_1 = make_emission_template(6585.27, res, wave)
+    # em_NII_2 = make_emission_template(6549.86, res, wave)
+    # em_SII_1 = make_emission_template(6718.29, res, wave)
+    # em_SII_2 = make_emission_template(6732.67, res, wave)
     ##########################################################################
     # Prepare templates for stellar population analysis
     if True:
@@ -142,14 +141,14 @@ if __name__ == "__main__":
         if not os.path.exists(wdir):
             os.mkdir(wdir)
         os.chdir(wdir)
-        linelist = [em_hbeta, em_OIII_2, em_OIII_1, em_halpha, em_NI,
-                    em_NII_1, em_NII_2, em_SII_1, em_SII_2]
+        linelist = [em_hbeta, em_OIII_2, em_OIII_1, em_NI]
         lines = np.zeros((len(wave), len(linelist)))
         for i, line in enumerate(linelist):
             lines[:,i] = line
-        w1, w2 = wave[0], wave[1]
+        w1, w2 = wave[0], wave[-1]
+        stars = broad2resolution(wave, stars.T, 2.51, res).T
         make_templates(wave, stars, lines, velscale, w1, w2,
-                       "templates_w{0}_{1}_res{2}.fits".format(w1+100, w2,
+                       "templates_w{0}_{1}_res{2}.fits".format(w1, w2,
                                                                res))
 
 
