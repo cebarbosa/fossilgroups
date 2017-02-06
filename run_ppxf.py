@@ -33,7 +33,6 @@ class pPXF():
     """ Class to read pPXF pkl files """
     def __init__(self, pp, velscale):
         self.__dict__ = pp.__dict__.copy()
-        self.dw = 1.25 # Angstrom / pixel
         self.calc_arrays()
         self.calc_sn()
         return
@@ -236,23 +235,30 @@ def run_ppxf(group, specs, redo=False, ncomp=2, **kwargs):
         # kwargs["lam"] = lam
         ###################################################################
         # Masking bad pixels
-        skylines = np.array([5000, 5577, 5636, 5889, 5933, 6300, 6863])
         goodpixels = np.arange(len(lam))
-        for line in skylines:
-            sky = np.argwhere((lam < line - 30) | (lam > line + 30)).ravel()
-            goodpixels = np.intersect1d(goodpixels, sky)
-        gaps = [[4500., 4600], [5000., 5200], ]
-        gaps=[[6400, 7000]]
+        gaps= set_badpixels(group)
         for gap in gaps:
             bad = np.argwhere((lam < gap[0]) | (lam > gap[1])).ravel()
             goodpixels = np.intersect1d(goodpixels, bad)
         kwargs["goodpixels"] = goodpixels
-        plt.plot(lam[goodpixels], galaxy[goodpixels], "ok")
-        plt.show(block=1)
-        continue
         ###################################################################
         kwargs["vsyst"] = dv
-        pp = ppxf(templates, galaxy, noise, velscale, **kwargs)
+        # First fitting to obtain realistic noise
+        pp0 = ppxf(templates, galaxy, noise, velscale, **kwargs)
+        pp0.has_emission = True
+        pp0.dv = dv
+        pp0.w = np.exp(logLam)
+        pp0.velscale = velscale
+        pp0.ngas = ngas
+        pp0.ntemplates = nstars
+        pp0.templates = 0
+        pp0.name = spec
+        pp0.title = ""
+        pp0 = pPXF(pp0, velscale)
+        pp0.calc_sn()
+        # Second fitting using results from first interaction
+        pp = ppxf(templates, galaxy, np.ones_like(galaxy) * pp0.noise,
+                   velscale, **kwargs)
         title = "Group {} , Spectrum {}".format(group.upper(), spec.replace(
             ".fits", "").replace("spec", ""))
         # Adding other things to the pp object
@@ -314,13 +320,22 @@ def plot_all(group):
         pp.plot("{0}".format(spec.replace(".fits", ".png")))
         plt.savefig(spec.replace(".fits", ".png"))
 
+def set_badpixels(group):
+    """ Set the best ranges for the fitting. """
+    if group == "RXJ0216":
+        return [[4349, 4353], [4523, 4531], [5569, 5592], [5627, 5642],
+                [6437, 6451], [6767, 6900]]
+    elif group == "ESO552":
+        return [[5563, 5592], [5630, 5642], [5742, 5754], [5926, 5941],
+                [6289, 6313], [6764, 6900]]
+    else:
+        return None
+
 
 if __name__ == "__main__":
     groups = ["RXJ0216", "ESO552"]
     vrefs = [19000., 9000.]
     for i, (vref, group) in enumerate(zip(vrefs, groups)):
-        if i == 0:
-            continue
         os.chdir(os.path.join(data_dir, group))
         start = np.array([[vref, 150., 0., 0.], [vref, 30., 0., 0.]])
         bounds = np.array([[[vref - 1000., vref + 1000.], [15., 800.],
@@ -328,13 +343,13 @@ if __name__ == "__main__":
                            [[vref - 1000., vref + 1000.], [15., 200.],
                             [-0.5, 0.5], [-0.5, 0.5]]])
         kwargs = {"start": start,
-                  "plot": False, "moments": [4, 4], "degree": -1,
-                  "mdegree": 10, "reddening": None, "clean": True,
+                  "plot": False, "moments": [4, 4], "degree": 10,
+                  "mdegree": 4, "reddening": None, "clean": False,
                   "bounds": bounds}
 
         specs = [x for x in os.listdir(".") if x.endswith(".fits")]
         run_ppxf(group, specs, redo=True, **kwargs)
-        # make_table(group)
-        # plot_all(group)
+        make_table(group)
+        plot_all(group)
 
 
