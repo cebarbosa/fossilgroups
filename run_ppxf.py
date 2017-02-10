@@ -199,8 +199,6 @@ def run_ppxf(group, specs, redo=False, ncomp=2, logdir="ppxf", window = 50,
              w1=None, w2=None, **kwargs):
     """ New function to run pPXF. """
     global velscale
-    tempfile = os.path.join(home, "MILES/templates/"
-                                  "templates_w3540.5_7409.6_res4.7.fits")
     stars = pf.getdata(tempfile, 0)
     emission = pf.getdata(tempfile, 1)
     logLam_temp = wavelength_array(tempfile, axis=1, extension=0)
