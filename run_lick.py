@@ -20,8 +20,7 @@ import matplotlib.pyplot as plt
 from ppxf.ppxf import reddening_curve
 
 from config import *
-from run_ppxf import pPXF, ppload
-from run_ppxf import wavelength_array
+from run_ppxf import pPXF, ppload, wavelength_array, set_badpixels
 from lick import Lick
 
 def check_intervals(setupfile, bands, vel):
@@ -95,38 +94,58 @@ def run_lick(group, specs=None, logdir="ppxf_mom4_bias0.7"):
         ssps_unbroad_v0 = ssps.dot(pp.w_ssps)
         ssps_broad = losvd_convolve(ssps_unbroad_v0, pp.sol[0])
         ssps_unbroad = losvd_convolve(ssps_unbroad_v0,
-                            np.array([pp.sol[0][0], 0.01*velscale, 0, 0]))
-        # plt.plot(w, data, "-ok")
-        plt.plot(wssps, ssps_unbroad, "-b")
-        plt.plot(wssps, ssps_broad, "-r")
-        plt.show(block=True)
-        ##################################################################
+                            np.array([pp.sol[0][0], 0.1*velscale, 0, 0]))
+        #######################################################################
+        # get approximate multiplicative polynomial
+        ftempl = interp1d(wssps, ssps_broad, kind="linear",
+                      fill_value="extrapolate", bounds_error=False)
+        goodpixels = np.arange(len(w), dtype=float)
+        gaps= set_badpixels(group)
+        for gap in gaps:
+            idx = np.where((w > gap[0] ) & (w < gap[1]))[0]
+            goodpixels[idx] = np.nan
+        goodpixels = goodpixels[~np.isnan(goodpixels)].astype(int)
+        fdata = interp1d(w[goodpixels], data[goodpixels], kind="linear",
+                      fill_value="extrapolate", bounds_error=False)
+        poly = np.poly1d(np.polyfit(w, fdata(w) / ftempl(w), 10))(w)
+        #######################################################################
         # Interpolate bestfit templates to obtain linear dispersion
         b0 = interp1d(wssps, ssps_unbroad, kind="linear",
                       fill_value="extrapolate", bounds_error=False)
         b1 = interp1d(wssps, ssps_broad, kind="linear",
                       fill_value="extrapolate", bounds_error=False)
-        best_unbroad = b0(w)
-        best_broad = b1(w)
+        best_unbroad = b0(w) * poly
+        best_broad = b1(w) * poly
         ##################################################################
         # Correct for emission lines
         em = interp1d(pp.w, pp.gas, kind="linear", bounds_error=False,
                       fill_value=0.)
         emission = em(w)
-        spec -= emission
+        data -= emission
         ###################################################################
-        # Correct for extinction
-        # spec /= reddening_curve(w, pp.reddening)
+        # Get goodpixels
+        # badpix = np.zeros(len(pp.galaxy))
+        # badpix[pp.goodpixels] = 1
+        # bp = interp1d(pp.w, badpix, kind="linear", bounds_error=False,
+        #               fill_value=1.)
+        # badpixels = bp(w)
         ###################################################################
         # Run the lector
-        l = Lick(w, spec, bands, vel=pp.sol[0][0])
+        l = Lick(w, data, bands, vel=pp.sol[0][0])
         lunb = Lick(w, best_unbroad, bands, vel=pp.sol[0][0])
         lbest = Lick(w, best_broad, bands, vel=pp.sol[0][0])
-        raw_input(404)
         ##################################################################
         # LOSVD correction using best fit templates
         ##################################################################
-        lickc = correct_lick(types, l.classic, lunb.classic, lbest.classic)
+        lickc = correct_lick(l, lunb, lbest, types)
+        # plt.plot(np.arange(25) + 0.3, l.classic, "ro", label="data")
+        # plt.plot(np.arange(25), lunb.classic, "bo", label="unconvolved")
+        # plt.plot(np.arange(25), lbest.classic, "ro", label="bestfit")
+        # plt.plot(np.arange(25) + 0.3, lickc, "bo", label="corrected")
+        # plt.axhline(y=0, c="k", ls="--")
+        # plt.legend()
+        # plt.title("{} : {}".format(group, spec))
+        # plt.show(block=True)
         ################################################################
         # Convert to string
         ################################################################
@@ -135,114 +154,139 @@ def run_lick(group, specs=None, logdir="ppxf_mom4_bias0.7"):
         lickc = "".join(["{0:14}".format("{0:.5f}".format(x)) for x
                          in lickc])
     #     # Append to output
-        logfile1 = "logs_sn{0}_w{3}_{4}/lick_{1}_bin{2:04d}" \
-                   "_raw.txt".format(targetSN, field, bin, w1, w2)
-        logfile2 = "logs_sn{0}_w{3}_{4}/lick_{1}_bin{2:04d}" \
-                   "_corr.txt".format(targetSN, field, bin, w1, w2)
+        logfile1 = "{}/lick_{}_raw.txt".format(logdir, spec.replace(".fits",
+                                                                    ""))
+        logfile2 = "{}/lick_{}_losvd_corrected.txt".format(logdir,
+                                                    spec.replace(".fits", ""))
         with open(logfile1, "w") as f:
             f.write("{0:16s}".format(pp.name) + lick + "\n")
         with open(logfile2, "w") as f:
             f.write("{0:16s}".format(pp.name) + lickc + "\n")
     return
 
-def run_mc(fields, targetSN, w1, w2, nsim=100, redo=False):
+def mc_lick(group, specs=None, logdir="ppxf_mom4_bias0.7", nsim=100):
     """ Perform Monte Carlo simulations to calculate uncertainties. """
     global velscale
-    bandsfile = os.path.join(tables_dir, "bands.txt")
+    wdir = os.path.join(data_dir, group)
+    os.chdir(wdir)
+    if specs == None:
+            specs = sorted([x for x in os.listdir(wdir)
+                     if x.endswith(".fits")])
+    bandsfile = os.path.join(home, "tables/bands.txt")
     bands = np.loadtxt(bandsfile, usecols=np.arange(2,8))
     types = np.loadtxt(bandsfile, usecols=(8,))
-    tempfile = os.path.join(home, \
-               "MILES10.0/templates/templates_w{0}_{1}_res2.95.fits".format(w1, w2))
+    tempfile = os.path.join(home, "MILES/templates/"
+                                  "templates_w3540.5_7409.6_res4.7.fits")
     ssps = pf.getdata(tempfile, 0).T
     wssps = np.exp(wavelength_array(tempfile, axis=1, extension=0))
-    for field in fields:
-        os.chdir(os.path.join(data_dir, "combined_{0}".format(field)))
-        specs = "binned_sn{0}.fits".format(targetSN)
-        w = wavelength_array(specs, axis=1, extension=0)
-        bins = wavelength_array(specs, axis=2, extension=0)
-        for bin in bins:
-            print "Working on {1} bin {0}".format(bin, field)
-            logfile = "logs_sn{0}_w{3}_{4}/lick_{1}_bin{2:04d}" \
-                       "_mcerr.txt".format(targetSN, field, bin, w1, w2)
-            if os.path.exists(logfile) and not redo:
-                continue
-            try:
-                pp = ppload("logs_sn{0}_w{3}_{4}/{1}_bin{2:04d}".format(targetSN,
-                                                            field, bin, w1, w2))
-                pp = pPXF(pp, velscale)
-                sol = pp.sol[0]
-                error = pp.error[0]
-                ##################################################################
-                # Produce composite stellar population
-                csp = ssps.dot(pp.w_ssps)
-                ##################################################################
-                # Setup simulations
-                vpert = np.random.normal(sol[0], np.maximum(error[0], 10),
-                                         nsim)
-                sigpert = np.random.normal(sol[1], np.maximum(error[1], 10),
-                                           nsim)
-                h3pert = np.random.normal(sol[2], np.maximum(error[2], 0.02),
-                                                             nsim)
-                h4pert = np.random.normal(sol[3], np.maximum(error[3], 0.02),
-                                                             nsim)
-                losvdsim = np.column_stack((vpert, sigpert, h3pert, h4pert))
-                licksim = np.zeros((nsim, 25))
-                ##################################################################
-                for i, losvd in enumerate(losvdsim):
-                    noise = np.random.normal(0., pp.noise, len(wssps))
-                    bestsim = losvd_convolve(csp, losvd)
-                    bestsim_unb = losvd_convolve(csp, np.array([losvd[0],
-                                                            0.1*losvd[1], 0, 0]))
-                    galsim = bestsim + noise
-                    ##############################################################
-                    # Run the lector
-                    lsim = Lick(wssps, galsim, bands, vel=losvd[0])
-                    lunb = Lick(wssps, bestsim_unb, bands, vel=losvd[0])
-                    lbest = Lick(wssps, bestsim, bands, vel=losvd[0])
-                    ##############################################################
-                    # LOSVD correction using best fit templates
-                    ##############################################################
-                    licksim[i] = correct_lick(types, lsim.classic,
-                                              lunb.classic, lbest.classic)
-                stds = np.zeros(25)
-                for i in range(25):
-                    if np.all(np.isnan(licksim[:,i])):
-                        stds[i] = np.nan
-                    else:
-                        stds[i] = np.nanstd(sigma_clip(licksim[:,i], sigma=5))
-                errors = ["{0:.5g}".format(x) for x in stds]
-                errors = "".join(["{0:12s}".format(x) for x in errors])
-                ###################################################################
-                # Storing results
-                with open(logfile, "w") as f:
-                    f.write("{0:16s}".format(pp.name) + errors + "\n")
-            except:
-                print "Problem on bin {0}".format(bin)
-                continue
+    for spec in specs:
+        print "Simulating errors for spectrum {} of system {}".format(spec,
+                                                                      group)
+        pp = ppload("{}/{}".format(logdir, spec.replace(".fits", "")))
+        pp = pPXF(pp, velscale)
+        sol = pp.sol[0]
+        error = pp.error[0]
+        w = wavelength_array(spec, axis=1, extension=0)
+        data = pf.getdata(spec)
+        #######################################################################
+        # get approximate multiplicative polynomial
+        ssps_unbroad_v0 = ssps.dot(pp.w_ssps)
+        ssps_broad = losvd_convolve(ssps_unbroad_v0, pp.sol[0])
+        ftempl = interp1d(wssps, ssps_broad, kind="linear",
+                      fill_value="extrapolate", bounds_error=False)
+        goodpixels = np.arange(len(w), dtype=float)
+        gaps= set_badpixels(group)
+        for gap in gaps:
+            idx = np.where((w > gap[0] ) & (w < gap[1]))[0]
+            goodpixels[idx] = np.nan
+        goodpixels = goodpixels[~np.isnan(goodpixels)].astype(int)
+        fdata = interp1d(w[goodpixels], data[goodpixels], kind="linear",
+                      fill_value="extrapolate", bounds_error=False)
+        poly = np.poly1d(np.polyfit(w, fdata(w) / ftempl(w), 10))(w)
+        ##################################################################
+        # Produce composite stellar population
+        csp = ssps.dot(pp.w_ssps)
+        ##################################################################
+        # Setup simulations
+        vpert = np.random.normal(sol[0], np.maximum(error[0], 10),
+                                 nsim)
+        sigpert = np.random.normal(sol[1], np.maximum(error[1], 10),
+                                   nsim)
+        h3pert = np.random.normal(sol[2], np.maximum(error[2], 0.02),
+                                                     nsim)
+        h4pert = np.random.normal(sol[3], np.maximum(error[3], 0.02),
+                                                     nsim)
+        losvdsim = np.column_stack((vpert, sigpert, h3pert, h4pert))
+        licksim = np.zeros((nsim, 25))
+        ##################################################################
+        for i, losvd in enumerate(losvdsim):
+            noise = np.random.normal(0., np.median(pp.noise), len(wssps))
+            bestsim = losvd_convolve(csp, losvd)
+            bestsim_unb = losvd_convolve(csp, np.array([losvd[0],
+                                                    0.1*losvd[1], 0, 0]))
+            galsim = bestsim + noise
+            ##############################################################
+            # Run the lector
+            lsim = Lick(wssps, galsim, bands, vel=losvd[0])
+            lunb = Lick(wssps, bestsim_unb, bands, vel=losvd[0])
+            lbest = Lick(wssps, bestsim, bands, vel=losvd[0])
+            ##############################################################
+            # LOSVD correction using best fit templates
+            ##############################################################
+            licksim[i] = correct_lick(lsim, lunb, lbest, types)
+        stds = np.zeros(25)
+        for i in range(25):
+            if np.all(np.isnan(licksim[:,i])):
+                stds[i] = np.nan
+            else:
+                stds[i] = np.nanstd(sigma_clip(licksim[:,i], sigma=5))
+        errors = ["{0:.5g}".format(x) for x in stds]
+        errors = "".join(["{0:12s}".format(x) for x in errors])
+        ###################################################################
+        # Storing results
+        logfile = "{}/lick_mcerr_{}_nsim{}.txt".format(logdir,
+                                            spec.replace(".fits", ""), nsim)
+        with open(logfile, "w") as f:
+            f.write("{0:16s}".format(pp.name) + errors + "\n")
 
-def correct_lick(types, lick, unbroad, broad):
+def correct_lick(lick, unbroad, broad, types):
     """ Make corrections for the broadening in the spectra."""
-    return np.where(types==0, lick * unbroad / broad, lick + unbroad - broad)
+    w = lick.bands
+    Rc = lick.R * (1 - (broad.R - unbroad.R) / broad.R)
+    return np.where(types == 1, -2.5 * np.log10(Rc), (1. - Rc) * (w[:,3] - w[:,2]))
 
-def make_table(fields, targetSN, w1, w2, ltype="corr"):
+def make_tables(group, logdir="ppxf_mom4_bias0.7", nsim=100 ):
     """ Gather information of Lick indices of a given target S/N in a single
     table. """
-    for field in fields:
-        os.chdir(os.path.join(data_dir, "combined_{0}".format(field),
-                              "logs_sn{0}_w{1}_{2}".format(targetSN, w1, w2)))
-        logfiles = sorted([x for x in os.listdir(".") if x.startswith("lick")
-                           and x.endswith("{0}.txt".format(ltype))])
-        table = []
-        for logfile in logfiles:
-            with open(logfile) as f:
+    global velscale
+    wdir = os.path.join(data_dir, group, logdir)
+    os.chdir(wdir)
+    table1, table2, table3 = [], [], []
+    for i in range(22):
+        filename1 = "lick_mcerr_spec{}_nsim{}.txt".format(i, nsim)
+        if os.path.exists(filename1):
+            with open(filename1) as f:
                 line = f.readline()
-            table.append(line)
-        output = os.path.join(data_dir, "combined_{0}".format(field),
-                 "lick_{0}_sn{1}_w{2}_{3}.txt".format(ltype, targetSN, w1, w2))
-        with open(output, "w") as f:
+            table1.append(line)
+        filename2 = "lick_spec{}_raw.txt".format(i)
+        if os.path.exists(filename2):
+            with open(filename2) as f:
+                line = f.readline()
+            table2.append(line)
+        filename3 = "lick_spec{}_losvd_corrected.txt".format(i)
+        if os.path.exists(filename3):
+            with open(filename3) as f:
+                line = f.readline()
+            table3.append(line)
+    outputs = ["lick_mcerr_nsim{}.txt".format(nsim), "lick_raw.txt",
+               "lick_losvd_corrected.txt"]
+    for i, table in enumerate([table1, table2, table3]):
+        with open(outputs[i], "w") as f:
             f.write("".join(table))
 
 if __name__ == "__main__":
     groups = ["RXJ0216", "ESO552"]
     for group in groups:
-        run_lick(group)
+        # run_lick(group)
+        mc_lick(group)
+        make_tables(group)

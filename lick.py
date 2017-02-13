@@ -41,7 +41,7 @@ class Lick():
                                 (self.wave < w[5])))
             idxcen = np.where(((self.wave > w[2]) &
                                 (self.wave < w[3])))
-            # Defining wavelenght samples
+            # Defining wavelength samples
             wb = self.wave[idxb]
             wr = self.wave[idxr]
             wcen = self.wave[idxcen]
